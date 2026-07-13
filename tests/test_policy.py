@@ -46,5 +46,40 @@ class PolicyContractTests(unittest.TestCase):
             self.assertIn(f"`{role}`", policy)
 
 
+    def test_no_role_is_told_to_detach_a_process(self) -> None:
+        """Verified empirically (2026-07-13): when a subagent's foreground command
+        exceeds its `timeout`, the harness promotes it to a background task. In an
+        agent spawned with `run_in_background: true` that promoted process survives,
+        completes, is captured, and its completion notification re-invokes the agent.
+        In an agent spawned in the FOREGROUND it is SIGTERMed seconds after the agent
+        returns — the work is destroyed and the captured output truncated.
+
+        `nohup`/`setsid` dodge that SIGTERM by escaping the process group, but they
+        also escape the harness's task tracking — no task id, no captured output, no
+        notification — so the result is orphaned instead. That is how a handoff strands.
+
+        No role may therefore be told to detach; the orchestrator owns long processes.
+        """
+        for role in ROLES:
+            agent = (ROOT / "templates" / "agents" / f"{role}.md").read_text(
+                encoding="utf-8"
+            )
+            for marker in ("nohup", "setsid", "disown"):
+                self.assertNotIn(
+                    marker,
+                    agent.lower().replace(f"no `{marker}`", ""),
+                    msg=(
+                        f"{role} is told to detach a process. Detaching escapes the "
+                        "harness's task tracking and orphans the result."
+                    ),
+                )
+
+        policy = (ROOT / "templates/claude-md.orchestration.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Long-running processes are yours, not a subagent's", policy)
+        self.assertIn("run_in_background: true", policy)
+
+
 if __name__ == "__main__":
     unittest.main()
