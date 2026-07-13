@@ -2,19 +2,23 @@
 
 ## Purpose
 
-This document explains *why* pilotfish is shaped the way it is: three layers, role-based policy, aliases everywhere, effort tiers, and a verification gate. The empirical grounding (official docs, measured community numbers, subscription economics) lives in the [research report](./research.zh-TW.md); this is the argument from those facts to this design.
+This document explains *why* pilotfish is shaped the way it is: a Claude Code plugin that delivers role-based policy, model aliases in role frontmatter, effort tiers, a verification gate, and a guard hook that enforces what policy can only ask for. The empirical grounding (official docs, measured community numbers, subscription economics) lives in the [research report](./research.zh-TW.md); this is the argument from those facts to this design.
+
+## Delivery: a plugin, not a config merge
+
+pilotfish ships as a Claude Code plugin — `/plugin marketplace add Nanako0129/pilotfish`, then `/plugin install pilotfish@pilotfish`, invoked with `/pilotfish`. It writes nothing into your `~/.claude/` config or into your projects: installing adds a self-contained namespaced bundle, uninstalling removes every trace. That packaging choice drives one detail that matters later — plugin agents are namespaced (`pilotfish:scout`, `pilotfish:executor`), which is precisely *why* the old "shadow the built-in Explore with a same-name agent" trick cannot work here, and why enforcement moved to a guard hook (see [The guard](#the-guard), below).
 
 ## The three layers
 
-The core observation is that "who orchestrates", "who executes what", and "how delegation behaves" change at different rates and should therefore live in different places:
+The core observation is that "who executes what", "how delegation behaves", and "which rules must be structurally enforced" change at different rates and should therefore live in different places:
 
 | Layer | File | Changes when | Mechanism |
 |---|---|---|---|
-| Machine | `~/.claude/settings.json` | Your plan/access changes | `model: "best"` + `fallbackModel` |
-| Roles | `~/.claude/agents/*.md` | A model tier is re-pointed | One `model:` line of frontmatter per role |
-| Policy | `~/.claude/CLAUDE.md` | Your working style changes | Prose rules written against role names |
+| Roles | `agents/*.md` | A model tier is re-pointed | One `model:` line of frontmatter per role |
+| Policy | `skills/pilotfish/SKILL.md` | Your working style changes | Prose rules written against role names; loads on `/pilotfish` |
+| Guard | `hooks/` + `scripts/guard.py` | Rarely | A `PreToolUse` hook that removes capabilities policy can only request |
 
-CLAUDE.md cannot set the main-session model (that is a settings/`/model` concern), which turns out to be a feature: it forces the clean split where settings decide *who* orchestrates and CLAUDE.md decides *how* it delegates.
+The policy is a **skill**, not a `CLAUDE.md` block, so it loads on demand when you type `/pilotfish` rather than sitting in every session's context. It never names a model — it delegates to role names, and the role frontmatter owns the model bindings. The main-session model stays a user/`settings` concern that pilotfish deliberately does not touch: settings decide *who* orchestrates, the skill decides *how* it delegates, and the guard makes a few of those "how" rules non-optional.
 
 ## Role-based policy, model-free prose
 
@@ -24,10 +28,10 @@ This is what makes the fallback story degenerate into no-ops:
 
 ```mermaid
 flowchart LR
-    P["Policy (CLAUDE.md)<br>roles only"] --> R["Roles (agents/*.md)<br>model: alias"] --> A["Aliases (Claude Code)<br>track recommended versions"] --> M["Models<br>come and go"]
+    P["Policy (SKILL.md)<br>roles only"] --> R["Roles (agents/*.md)<br>model: alias"] --> A["Aliases (Claude Code)<br>track recommended versions"] --> M["Models<br>come and go"]
 ```
 
-The June 2026 export-control suspension was a live test of this: accounts on aliases degraded gracefully — a notice banner, new sessions continuing on Opus — while users who had pinned the full `claude-fable-5` model ID got hard 404 errors. That is the fallback story working: `best` re-resolves, every role keeps its binding, and the policy text is already model-agnostic. The July 2026 subscription-to-credits boundary is expected to behave the same way per the documented resolution rule, though Anthropic has not published the exact boundary UX — worst case is one manual `/model` switch or enabling usage credits. The same holds for the next deprecation cycle (Opus 4.8 → 4.9, Sonnet 5 → next): aliases track the recommended version by design.
+The June 2026 export-control suspension was a live test of this: accounts on aliases degraded gracefully — a notice banner, new sessions continuing on Opus — while users who had pinned the full `claude-fable-5` model ID got hard 404 errors. That is the resilience story working: every role's alias re-resolves and keeps its binding, and the policy text is already model-agnostic. The July 2026 subscription-to-credits boundary is expected to behave the same way per the documented resolution rule, though Anthropic has not published the exact boundary UX — worst case is one manual `/model` switch or enabling usage credits. The same holds for the next deprecation cycle (Opus 4.8 → 4.9, Sonnet 5 → next): aliases track the recommended version by design.
 
 Three distinct failure modes get three distinct mechanisms — they are often conflated but shouldn't be:
 
@@ -37,19 +41,36 @@ Three distinct failure modes get three distinct mechanisms — they are often co
 | Model *overloaded / erroring* | `fallbackModel` chain | settings |
 | Model *deprecated* | aliases in role frontmatter | agents |
 
-## Why these six roles
+Only the third row is pilotfish's own — the plugin ships the role aliases and nothing else. The first two are user-owned `settings.json` mechanisms pilotfish recommends but does not install (a plugin writes nothing to your config); they protect the main session, which pilotfish leaves to you.
+
+## Why these five roles
 
 The role set is the smallest one that covers the delegation patterns that actually recur, mapped to the cheapest tier that reliably handles each:
 
 | Role | Tier argument |
 |---|---|
-| `scout`, `Explore` | Reconnaissance is the highest-volume, lowest-judgment token sink in a coding session (telemetry showed ~36% of calls were exploration even before deliberate routing). For *locating* facts — not judging them — Haiku at low effort is effectively equivalent; judgment stays with the orchestrator. Both roles carry a positive `tools: Read, Glob, Grep` allowlist, so "read-only" is enforced, not just prompted. |
+| `scout` | Reconnaissance is the highest-volume, lowest-judgment token sink in a coding session (telemetry showed ~36% of calls were exploration even before deliberate routing). For *locating* facts — not judging them — Haiku at low effort is effectively equivalent; judgment stays with the orchestrator. `scout` carries a positive `tools: Read, Glob, Grep` allowlist, so "read-only" is enforced, not just prompted. It is also where recon *must* land: the guard blocks the built-in `Explore` (see below) and points callers here. |
 | `mech-executor` | Fully-specified work has its judgment already done — by the orchestrator, in the spec. Sonnet executes specs faithfully, and on subscriptions it additionally draws on the dedicated Sonnet-only weekly bucket (extra headroom on top of the shared all-models limit). |
 | `executor` | Real implementation needs local design judgment; Opus is the measured sweet spot below the frontier. Notably it beats routing to the frontier even ignoring cost, because routine work doesn't benefit from Fable-tier reasoning. |
 | `verifier` | Official guidance: independent fresh-context verifiers outperform self-critique. It is read-and-run only — a verifier that fixes things stops being independent. |
 | `security-executor` | Two reasons: security work deserves consistently high effort, and the frontier model's safety classifiers can refuse benign defensive-security work mid-task. Pre-routing security to Opus makes the refusal path unreachable instead of handled. |
 
-The `Explore` override exists because Claude Code v2.1.198 changed the built-in Explore agent to inherit the main-session model — on a frontier main session, that silently upgrades your cheapest workload to your most expensive model. A same-name user-level agent shadows it.
+## The guard
+
+A policy is a request; a subagent can read "don't do X" and do X anyway. Removing the capability is a fact. Three rules that used to be prose in a policy block are now enforced by a `PreToolUse` hook (`scripts/guard.py`), because prose kept failing. Enforcement-by-hook beats enforcement-by-instruction for the same reason a locked door beats a "please don't enter" sign: the model never gets to weigh the rule against the task in front of it.
+
+| | Main session | Subagent |
+|---|---|---|
+| `run_in_background` on `Bash` | allowed | **denied** |
+| `nohup` / `setsid` / `disown` / trailing `&` | allowed | **denied** |
+| built-in `Explore` agent | **denied** → use `scout` | — |
+
+Two things the guard buys:
+
+- **Backgrounding stays with the orchestrator.** When a subagent's foreground command exceeds its `timeout`, Claude Code promotes it to a background task — but a promoted process from a foreground-spawned agent is `SIGTERM`ed seconds after the agent returns, destroying the work and truncating its output. `nohup`/`setsid` dodge that `SIGTERM` by escaping the process group, but they also escape task tracking entirely, so the result is an orphan nobody collects. So subagents don't detach at all; long-running work is handed back to the main session, the only context whose background tasks are both tracked and reliably notified.
+- **Recon can't leak onto the frontier model.** Since Claude Code v2.1.198 the built-in `Explore` inherits the main-session model, so every search it runs from a Fable/Opus session bills at frontier rates. The earlier design tried to neutralize this by shadowing `Explore` with a same-name user-level agent pinned to Haiku — **that does not work for a plugin**, because plugin agents are namespaced (`pilotfish:Explore` is a different agent from the built-in `Explore` and cannot shadow it). So the guard blocks the built-in outright and instructs the caller to re-issue the call as `scout`, which is the same read-only recon role pinned to Haiku.
+
+**Honest about the limits.** The `run_in_background` denial is airtight: it is a structural block on a typed boolean parameter — either the flag is set or it isn't, and the check can't be evaded by phrasing. The shell-detach denial is *not* airtight: `nohup`/`setsid`/`disown`/trailing-`&` are matched by regex over the command string, which reliably catches the accidental, idiomatic case (a subagent reaching for `nohup … &` out of habit) but cannot defeat a determined evasion — quoting tricks, an indirection through a wrapper script, or a detaching syscall never spelled `nohup` all slip past string matching. This is best-effort defense-in-depth for the common failure, not a security boundary. The guard also fails open: a malformed hook payload never breaks your session.
 
 ## Quality: verification over executor pedigree
 
@@ -67,7 +88,7 @@ Effort is the second big quota lever after model choice, and the Fable-5 generat
 
 | Role class | Effort | Why |
 |---|---|---|
-| Recon (`scout`, `Explore`) | `low` | High volume, near-zero judgment |
+| Recon (`scout`) | `low` | High volume, near-zero judgment |
 | Mechanical (`mech-executor`) | `low` | Judgment lives in the spec |
 | Judgment (`executor`, `verifier`) | `medium` | Balance point |
 | Security (`security-executor`) | `high` | Correctness over cost |
@@ -77,12 +98,12 @@ Effort is the second big quota lever after model choice, and the Fable-5 generat
 
 | Not included | Why |
 |---|---|
-| Per-project configuration | The six projects audited before building this had zero model policy in their CLAUDE.md files — correctly. A single global source of truth is the whole point; project files stay pure technical notes. |
-| Enforcement hooks (spawn guards, stop guards à la fable5-orchestrator) | Powerful but heavy; policy-only works well before adding machinery. If discipline slips, hooks are the documented next step — see the research report. |
-| `CLAUDE_CODE_SUBAGENT_MODEL` | It overrides every per-agent frontmatter globally, which is precisely the opposite of tiered routing. The installer warns if it's set. |
+| Per-project configuration | The six projects audited before building this had zero model policy in their `CLAUDE.md` files — correctly. The plugin is a single source of truth; project files stay pure technical notes. |
+| Heavy orchestration hooks (spawn guards that block under-specified delegations, stop guards à la fable5-orchestrator) | pilotfish ships one narrow guard (backgrounding/detach + the built-in `Explore`; see [The guard](#the-guard)) because those rules can't be enforced any other way. The broader orchestration-discipline hooks stay out: they are heavy, and everything else is better handled by policy plus the verifier gate. If discipline slips, they are the documented next step — see the research report. |
+| `CLAUDE_CODE_SUBAGENT_MODEL` | It overrides every per-agent frontmatter globally, which is precisely the opposite of tiered routing. pilotfish never sets it; if you have it set in your environment, unset it or the role model bindings are ignored. |
 | Pinned model IDs | Pinning trades resilience for reproducibility; for a personal global config, resilience wins. Organizations that need pinning have `ANTHROPIC_DEFAULT_*_MODEL`. |
 | An `opusplan` default | It's a great quota-saver but changes interactive feel (model switches mid-conversation). Offered as an opt-in in the FAQ instead. |
 
 ## Prompting style inside the agents
 
-The agent system prompts follow the Fable-5-generation guidance from the research: goals and constraints instead of step-by-step scaffolding, an explicit statement of what *not* to do (no scope creep, verifier never fixes), evidence-audited progress claims, and "a precise *blocked because X* is a successful outcome" to prevent guessing. When editing the templates, keep that register — prescriptive checklists measurably degrade current-generation output.
+The agent system prompts follow the Fable-5-generation guidance from the research: goals and constraints instead of step-by-step scaffolding, an explicit statement of what *not* to do (no scope creep, verifier never fixes), evidence-audited progress claims, and "a precise *blocked because X* is a successful outcome" to prevent guessing. When editing the agent files in `agents/`, keep that register — prescriptive checklists measurably degrade current-generation output.

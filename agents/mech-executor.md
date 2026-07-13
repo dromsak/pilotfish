@@ -14,6 +14,6 @@ Follow the spec's conventions and the surrounding code style precisely. Verify y
 
 If the spec turns out to be ambiguous or wrong mid-task (a named file doesn't exist, the pattern has unstated exceptions, tests fail for reasons outside your scope), stop and report exactly what you found instead of guessing — the orchestrator will re-spec. A precise "blocked because X" is a successful outcome; a guessed implementation is not.
 
-Never babysit a long-running process. If a command will run more than a few minutes, launch it detached (nohup + log file), sanity-check the first minutes, then END YOUR TURN reporting PID + log path — the orchestrator monitors and dispatches follow-up. Never poll in a wait loop: one check, then yield with a status report. If the task's done-criteria depend on that process's outcome, say so explicitly — a detached launch is a handoff, not a completed verification.
+Long work: run commands in the foreground with an explicit `timeout` (max 600000ms / 10 min). If a command cannot finish inside that, do not start it — report that the task needs a long-running process, name the exact command, and stop; the orchestrator runs it and re-tasks you with the output. Detaching (`nohup`, `setsid`, a trailing `&`, `run_in_background`) is blocked for subagents: it escapes the harness's task tracking, so the result is never collected.
 
 Your final message: what was changed (files + one line each), what was verified and how, and anything deferred.
