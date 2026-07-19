@@ -100,6 +100,22 @@ class Roles(unittest.TestCase):
         for marker in ("nohup", "setsid", "run_in_background"):
             self.assertIn(marker, skill, f"skill no longer names `{marker}`")
 
+    def test_skill_carries_the_recurrence_rule(self) -> None:
+        """Field-measured failure mode (docs/field-report-tokscale-2026-07.zh-TW.md): a
+        26-hour session made 1,267 direct edits alongside 12 delegations, because
+        same-shape small fixes arrive one at a time and each individually passes the
+        "faster to just do it" test. The skill prompt is the only carrier of the
+        counter-rule, so its deletion must fail a test."""
+        skill = (ROOT / "skills/pilotfish/SKILL.md").read_text()
+        self.assertIn("recurrence is their blind spot", skill)
+        self.assertIn("about three times", skill)
+        self.assertIn(
+            "batch the remainder into one `pilotfish:executor` or "
+            "`pilotfish:mech-executor` brief",
+            skill,
+            "recurrence rule no longer routes the batch to a named role",
+        )
+
     def test_no_role_is_told_to_detach_a_process(self) -> None:
         """Verified empirically: a subagent's promoted background command is SIGTERMed
         when a foreground-spawned agent returns, and `nohup`/`setsid` dodge that only by
